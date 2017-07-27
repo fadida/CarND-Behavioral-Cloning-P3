@@ -24,7 +24,7 @@ flags.DEFINE_float('learning_rate', 1e-3, 'The learning rate of the model.')
 flags.DEFINE_integer('epochs', 10, 'The number of epochs used for training the model')
 flags.DEFINE_integer('batch_size', 100, 'The number of samples in each batch')
 flags.DEFINE_boolean('load_model', True, 'If `True` load model from last runs.')
-
+flags.DEFINE_boolean('trace', False, 'If `True` display extended tracebacks on exception.')
 
 def model():
     """
@@ -217,6 +217,11 @@ class DriveDataSplitAndProcess:
 
 
 def main(_):
+
+    # Enable extended backtraces
+    if FLAGS.trace:
+        cgitb.enable(format='text')
+
     # Load or initalize the model
     model_loaded = False
     if FLAGS.load_model:
@@ -247,7 +252,4 @@ def main(_):
 
 # parses flags and calls the `main` function above
 if __name__ == '__main__':
-    # Enable extended backtraces
-    cgitb.enable(format='text')
-
     tf.app.run(main)
