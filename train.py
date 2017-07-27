@@ -8,10 +8,11 @@ import pandas as pd
 import matplotlib.image as mpimg
 import numpy as np
 import tensorflow as tf
-from keras.models import Sequential
+import cgitb
+from keras.models import Sequential, load_model
 from keras.layers import Lambda, Convolution2D, Flatten, Dense, Cropping2D
-from keras.backend import tf as ktf
-from sklearn.model_selection import StratifiedShuffleSplit
+from keras.optimizers import Adam
+from sklearn.model_selection import ShuffleSplit
 
 flags = tf.app.flags
 FLAGS = flags.FLAGS
@@ -19,8 +20,11 @@ FLAGS = flags.FLAGS
 # Command line flags
 flags.DEFINE_string('drive_data', '', 'Path to folder which contains drive data from the simulator')
 flags.DEFINE_string('out', './model.h5', 'Output path from model file.')
+flags.DEFINE_float('learning_rate', 1e-3, 'The learning rate of the model.')
 flags.DEFINE_integer('epochs', 10, 'The number of epochs used for training the model')
 flags.DEFINE_integer('batch_size', 100, 'The number of samples in each batch')
+flags.DEFINE_boolean('load_model', True, 'If `True` load model from last runs.')
+
 
 def model():
     """
@@ -29,31 +33,44 @@ def model():
     :return: a Keras model of the network
     """
 
+    def create_resize_func(size):
+        """
+        Creates a resize function of images using keras tf backend.
+        This function is meant to be used in Lambda layer.
+        :param size: The target size for the images
+        :return: A function that can resize a tensor with images
+        """
+        def resize(x):
+            from keras.backend import tf as ktf
+            return ktf.image.resize_images(x, size)
+
+        return resize
+
     m = Sequential(name='NVIDIA_DAVE_2')
     # Crop the image to 89x270
     m.add(Cropping2D(cropping=((45, 26), (20, 30)), input_shape=(160, 320, 3)))
     # Resize the image
-    m.add(Lambda(lambda im: ktf.image.resize_images(im, (66, 200))))
+    m.add(Lambda(create_resize_func((66, 200))))
     # Normalization layer
     m.add(Lambda(lambda im: im / 255.0 - 0.5))
     # Convolution layer 1 - out = 31x98x24
-    m.add(Convolution2D(24, (5, 5), strides=(2, 2)))
+    m.add(Convolution2D(24, (5, 5), strides=(2, 2), activation='relu'))
     # Convolution layer 2 - out = 14x47x36
-    m.add(Convolution2D(36, (5, 5), strides=(2, 2)))
+    m.add(Convolution2D(36, (5, 5), strides=(2, 2), activation='relu'))
     # Convolution layer 3 - out = 5x22x48
-    m.add(Convolution2D(48, (5, 5), strides=(2, 2)))
+    m.add(Convolution2D(48, (5, 5), strides=(2, 2), activation='relu'))
     # Convolution layer 5 - out = 3x20x64
-    m.add(Convolution2D(64, (3, 3)))
+    m.add(Convolution2D(64, (3, 3), activation='relu'))
     # Convolution layer 6 - out = 1x18x64
-    m.add(Convolution2D(64, (3, 3)))
+    m.add(Convolution2D(64, (3, 3), activation='relu'))
     # Flatten layer - out = 1x1152
     m.add(Flatten())
     # Fully connected 1
-    m.add(Dense(100))
+    m.add(Dense(100, activation='relu'))
     # Fully connected 2
-    m.add(Dense(50))
+    m.add(Dense(50, activation='relu'))
     # Fully connected 3
-    m.add(Dense(10))
+    m.add(Dense(10, activation='relu'))
     # Out layer
     m.add(Dense(1))
 
@@ -74,7 +91,7 @@ def load_drive_data():
                                                                                 'throttle', 'break', 'speed'])
             # Correct the data set image paths
             driving_log[['center', 'left', 'right']] = driving_log[['center', 'left', 'right']]\
-                .applymap(lambda path: curr + os.sep + 'IMG' + os.sep + os.path.basename(path))
+                .applymap(lambda path: curr + os.sep + 'IMG' + os.sep + path.split('\\')[-1])
 
             yield driving_log
 
@@ -92,7 +109,7 @@ def extract_features_and_labels(driving_log):
     right_factor = -0.2
 
     # Calculate straight drop - the number of straight steering samples to drop
-    straight_max_val = 0.085
+    straight_max_val = 0.85
     n_straight_frames = driving_log.query('{} <= steering <= {}'.format(-straight_max_val, straight_max_val)).count()[1]
     straight_drop = 0.7 * n_straight_frames
 
@@ -127,8 +144,9 @@ class DriveDataSplitAndProcess:
      this class creates training and validation generators, while in training the data
      is augmented by adding flipped images.
     """
-
-    _validation = []
+    __slots__ = ['_splitter', '_batch_size', '_features',
+                 '_labels', '_steps_per_epoch_train',
+                 '_steps_per_epoch_valid', '_validation']
 
     def __init__(self, epochs, batch_size, features, labels, test_size=0.2):
         """
@@ -144,14 +162,14 @@ class DriveDataSplitAndProcess:
         n_examples = labels.shape[0]
         n_train_examples, n_valid_examples = n_examples * (1-test_size), n_examples * test_size
 
-        self._splitter = StratifiedShuffleSplit(n_splits=epochs, test_size=test_size)
+        self._splitter = ShuffleSplit(n_splits=epochs, test_size=test_size)
         self._batch_size = batch_size
         self._features = features
         self._labels = labels
+        self._validation = []
 
         # Calculate number of steps per epoch for training and validation sets
-        # For training step calculation, multiply n_splits by two in order to include the augmented data batches.
-        self._steps_per_epoch_train = int(n_train_examples / batch_size) * 2
+        self._steps_per_epoch_train = int(n_train_examples / batch_size)
         self._steps_per_epoch_valid = int(n_valid_examples / batch_size)
 
     def steps_per_epoch(self, validation=False):
@@ -163,8 +181,8 @@ class DriveDataSplitAndProcess:
         if validation:
             return self._steps_per_epoch_valid
         else:
-
-            return self._steps_per_epoch_train
+            # For training step calculation, multiply n_splits by two in order to include the augmented data batches.
+            return self._steps_per_epoch_train * 2
 
     def train_data_gen(self):
         """
@@ -173,18 +191,18 @@ class DriveDataSplitAndProcess:
         """
         features, labels, batch_size = self._features, self._labels, self._batch_size
 
-        # Use np.digitize in order to arrange the labels in smaller groups for the splitter, otherwise the `split`
-        # function will return an error stating that there are classes with only one value.
-        for train_idx_list, valid_idx_list in self._splitter.split(features, np.digitize(labels,
-                                                                                         bins=np.arange(-1, 1, 0.2))):
-            self._validation += list(valid_idx_list)
+        while True:
+            # Empty validation list every shuffle
+            self._validation.clear()
+            for train_idx_list, valid_idx_list in self._splitter.split(features, labels):
+                self._validation += list(valid_idx_list)
 
-            for batch_idx in range(self._steps_per_epoch_train):
-                batch_idx_lst = train_idx_list[batch_idx * batch_size: (batch_idx + 1) * batch_size]
-                X_train, y_train = features[batch_idx_lst], labels[batch_idx_lst]
-                yield X_train, y_train
-                # Return horizontal flipped version of each image
-                yield np.array(list(map(lambda x: cv2.flip(x, 1), X_train))), (-1)*y_train
+                for batch_idx in range(self._steps_per_epoch_train):
+                    batch_idx_lst = train_idx_list[batch_idx * batch_size: (batch_idx + 1) * batch_size]
+                    X_train, y_train = features[batch_idx_lst], labels[batch_idx_lst]
+                    yield X_train, y_train
+                    # Return horizontal flipped version of each image
+                    yield np.array(list(map(lambda x: cv2.flip(x, 1), X_train))), (-1)*y_train
 
     def validation_data_gen(self):
         """
@@ -192,14 +210,30 @@ class DriveDataSplitAndProcess:
         :return: a generator
         """
         features, labels, batch_size = self._features, self._labels, self._batch_size
-        for batch_idx in range(self._steps_per_epoch_valid):
-            batch_idx_lst = self._validation[batch_idx * batch_size: (batch_idx + 1) * batch_size]
-            yield features[batch_idx_lst], labels[batch_idx_lst]
+        while True:
+            for batch_idx in range(self._steps_per_epoch_valid):
+                batch_idx_lst = self._validation[batch_idx * batch_size: (batch_idx + 1) * batch_size]
+                yield features[batch_idx_lst], labels[batch_idx_lst]
 
 
 def main(_):
-    m = model()
+    # Load or initalize the model
+    model_loaded = False
+    if FLAGS.load_model:
+        model_path = FLAGS.out
+        if os.path.exists(model_path):
+            print('Loading model from {}'.format(model_path))
+            m = load_model(model_path)
+            model_loaded = True
+        else:
+            print("Couldn't find the model file {}".format(model_path))
+    if not model_loaded:
+        print('Creating model with learning rate of {}'.format(FLAGS.learning_rate))
+        m = model()
+        adam = Adam(lr=FLAGS.learning_rate)
+        m.compile(optimizer=adam, loss='mse', metrics=['accuracy'])
 
+    # Traing the model
     for data in load_drive_data():
         features, labels = extract_features_and_labels(data)
         processor = DriveDataSplitAndProcess(FLAGS.epochs, FLAGS.batch_size, features, labels)
@@ -213,4 +247,7 @@ def main(_):
 
 # parses flags and calls the `main` function above
 if __name__ == '__main__':
+    # Enable extended backtraces
+    cgitb.enable(format='text')
+
     tf.app.run(main)
