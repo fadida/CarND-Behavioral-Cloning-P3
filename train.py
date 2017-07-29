@@ -2,7 +2,6 @@
 in order to train the CarND simulator.
 """
 import os
-
 import cv2
 import pandas as pd
 import matplotlib.image as mpimg
@@ -10,9 +9,11 @@ import numpy as np
 import tensorflow as tf
 import cgitb
 from keras.models import Sequential, load_model
-from keras.layers import Lambda, Convolution2D, Flatten, Dense, Cropping2D
+from keras.layers import Lambda, Convolution2D, Flatten, Dense, Cropping2D, Dropout
 from keras.optimizers import Adam
+from keras.callbacks import TensorBoard
 from sklearn.model_selection import ShuffleSplit
+from sklearn.utils import shuffle
 
 flags = tf.app.flags
 FLAGS = flags.FLAGS
@@ -21,36 +22,51 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string('drive_data', '', 'Path to folder which contains drive data from the simulator')
 flags.DEFINE_string('out', './model.h5', 'Output path from model file.')
 flags.DEFINE_float('learning_rate', 1e-3, 'The learning rate of the model.')
+flags.DEFINE_float('dropout_rate', 0.6, 'The dropout rate of the model.')
 flags.DEFINE_integer('epochs', 10, 'The number of epochs used for training the model')
-flags.DEFINE_integer('batch_size', 100, 'The number of samples in each batch')
-flags.DEFINE_boolean('load_model', True, 'If `True` load model from last runs.')
+flags.DEFINE_integer('batch_size', 128, 'The number of samples in each batch')
+flags.DEFINE_boolean('load_model', False, 'If `True` load model from last runs.')
 flags.DEFINE_boolean('trace', False, 'If `True` display extended tracebacks on exception.')
 
-def model():
+
+def model(dropout_rate):
     """
-    Creates the NVIDIA CNN model for DAVE-2.
+    Creates the NVIDIA CNN model for DAVE-2 with some modifications
+    to make it fit to Udacity CarND simulator images.
     The network get as input 66x200 color images
     :return: a Keras model of the network
     """
 
-    def create_resize_func(size):
+    # ### Helper functions for lambda layers #############
+    def resize_func(x):
         """
-        Creates a resize function of images using keras tf backend.
+        Resizes images using keras tf backend.
         This function is meant to be used in Lambda layer.
-        :param size: The target size for the images
-        :return: A function that can resize a tensor with images
+        :param x: A tensor with images to resize
+        :return: A tensor with images in size 66x200.
         """
-        def resize(x):
-            from keras.backend import tf as ktf
-            return ktf.image.resize_images(x, size)
+        from keras.backend import tf as ktf
+        return ktf.image.resize_images(x, (66, 200))
 
-        return resize
+    def grayscale_func(x):
+        """
+        Convert images to gray scale using keras tf backend.
+        This function is meant to be used in Lambda layer.
+        :param x: A tensor with images in RGB format
+        :return: A tensor with images in gray scale.
+        """
+        from keras.backend import tf as ktf
+        return ktf.image.rgb_to_grayscale(x)
+
+    # ################################################
 
     m = Sequential(name='NVIDIA_DAVE_2')
     # Crop the image to 89x270
     m.add(Cropping2D(cropping=((45, 26), (20, 30)), input_shape=(160, 320, 3)))
     # Resize the image
-    m.add(Lambda(create_resize_func((66, 200))))
+    m.add(Lambda(resize_func))
+    # Turn the image to gray scale
+    m.add(Lambda(grayscale_func))
     # Normalization layer
     m.add(Lambda(lambda im: im / 255.0 - 0.5))
     # Convolution layer 1 - out = 31x98x24
@@ -67,6 +83,8 @@ def model():
     m.add(Flatten())
     # Fully connected 1
     m.add(Dense(100, activation='relu'))
+    # Dropout layer
+    m.add(Dropout(rate=dropout_rate))
     # Fully connected 2
     m.add(Dense(50, activation='relu'))
     # Fully connected 3
@@ -96,12 +114,15 @@ def load_drive_data():
             yield driving_log
 
 
-def extract_features_and_labels(driving_log):
+def extract_features_and_labels(driving_log, straight_max_val=0.85, straight_drop_percentage=0.7):
     """
     Creates feature set and labels set from `driving_log`.
     The features set contains the paths to the images and
     the labels set contains the steering angles.
     :param driving_log: The drive data set
+    :param straight_max_val: Specifies upper absolute value for a steering data to be considered straight.
+                              i.e: abs(steering) <= straight_max_val.
+    :param straight_drop_percentage: The percentage of straight steering data to drop (between 0 to 1)
     :return: tuple with the features and labels sets.
     """
     # Steering factors for left and right images
@@ -109,22 +130,13 @@ def extract_features_and_labels(driving_log):
     right_factor = -0.2
 
     # Calculate straight drop - the number of straight steering samples to drop
-    straight_max_val = 0.85
     n_straight_frames = driving_log.query('{} <= steering <= {}'.format(-straight_max_val, straight_max_val)).count()[1]
-    straight_drop = 0.7 * n_straight_frames
+    straight_drop_count = straight_drop_percentage * n_straight_frames
 
     features, labels = [], []
     print('Extracting features & labels from data....', end='')
     for idx, row in driving_log.iterrows():
         steering = row[3]
-
-        # Remove some of the samples of straight steering in order to prevent
-        # the model from biasing towards no steering.
-        if -straight_max_val < steering < straight_max_val:
-            if straight_drop > 0:
-                straight_drop -= 1
-            else:
-                continue
 
         features += [mpimg.imread(row[0])]  # center image
         features += [mpimg.imread(row[1])]  # left image
@@ -133,6 +145,18 @@ def extract_features_and_labels(driving_log):
         labels += [steering]
         labels += [steering + left_factor]
         labels += [steering + right_factor]
+
+    # Drop random samples of straight data in order to prevent
+    # the model from biasing towards no steering.
+    shuffle(features, labels)
+    idx = 0
+    while straight_drop_count > 0:
+        if -straight_max_val < labels[idx] < straight_max_val:
+            straight_drop_count -= 1
+            labels.pop(idx)
+            features.pop(idx)
+        else:
+            idx += 1
 
     print('Done.')
     return np.array(features), np.array(labels, dtype=np.float32)
@@ -234,20 +258,25 @@ def main(_):
             print("Couldn't find the model file {}".format(model_path))
     if not model_loaded:
         print('Creating model with learning rate of {}'.format(FLAGS.learning_rate))
-        m = model()
-        adam = Adam(lr=FLAGS.learning_rate)
-        m.compile(optimizer=adam, loss='mse', metrics=['accuracy'])
+        m = model(FLAGS.dropout_rate)
 
-    # Traing the model
+    adam = Adam(lr=FLAGS.learning_rate)
+    m.compile(optimizer=adam, loss='mse', metrics=['accuracy'])
+
+    tensorboard_callback = TensorBoard(batch_size=FLAGS.batch_size,
+                                       write_grads=True, write_images=True, histogram_freq=1)
+
+    # Training the model
     for data in load_drive_data():
         features, labels = extract_features_and_labels(data)
         processor = DriveDataSplitAndProcess(FLAGS.epochs, FLAGS.batch_size, features, labels)
 
         m.fit_generator(processor.train_data_gen(), processor.steps_per_epoch(), epochs=FLAGS.epochs,
                         validation_data=processor.validation_data_gen(),
-                        validation_steps=processor.steps_per_epoch(validation=True))
+                        validation_steps=processor.steps_per_epoch(validation=True),
+                        callbacks=[tensorboard_callback])
         print('Writing model to {}'.format(FLAGS.out))
-        m.save(FLAGS.out)
+        m.save(FLAGS.out, include_optimizer=False)
 
 
 # parses flags and calls the `main` function above
