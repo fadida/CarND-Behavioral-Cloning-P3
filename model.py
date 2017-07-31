@@ -33,7 +33,9 @@ def model(dropout_rate):
     """
     Creates the NVIDIA CNN model for DAVE-2 with some modifications
     to make it fit to Udacity CarND simulator images.
-    The network get as input 66x200 color images
+    The model was built according to:
+    http://images.nvidia.com/content/tegra/automotive/images/2016/solutions/pdf/end-to-end-dl-using-px.pdf
+    The network get as input 66x200 color images from Udacity CarND simulator.
     :return: a Keras model of the network
     """
 
@@ -85,8 +87,11 @@ def model(dropout_rate):
 
 def load_drive_data():
     """
-    Loads the drive data from the simulator
-    :return: a generator with
+    Loads the driving log csv files created from the simulator.
+    This method also corrects the images paths in the csv files in order
+    to ease later processing.
+    :return: a generator with all driving log files that can be
+             found within the `drive_data` arguemt folder.
     """
     data_folder = FLAGS.drive_data
     assert os.path.isdir(data_folder), '"{}" is not a folder'.format(data_folder)
@@ -107,6 +112,8 @@ def extract_features_and_labels(driving_log, straight_max_val=0.85, straight_dro
     Creates feature set and labels set from `driving_log`.
     The features set contains the paths to the images and
     the labels set contains the steering angles.
+    After extracting, both sets are shuffled and data with straight steering is
+    filtered according to `straight_max_val` and `straight_drop_percentage`.
     :param driving_log: The drive data set
     :param straight_max_val: Specifies upper absolute value for a steering data to be considered straight.
                               i.e: abs(steering) <= straight_max_val.
