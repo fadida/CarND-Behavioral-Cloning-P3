@@ -48,16 +48,6 @@ def model(dropout_rate):
         from keras.backend import tf as ktf
         return ktf.image.resize_images(x, (66, 200))
 
-    def grayscale_func(x):
-        """
-        Convert images to gray scale using keras tf backend.
-        This function is meant to be used in Lambda layer.
-        :param x: A tensor with images in RGB format
-        :return: A tensor with images in gray scale.
-        """
-        from keras.backend import tf as ktf
-        return ktf.image.rgb_to_grayscale(x)
-
     # ################################################
 
     m = Sequential(name='NVIDIA_DAVE_2')
@@ -65,8 +55,6 @@ def model(dropout_rate):
     m.add(Cropping2D(cropping=((45, 26), (20, 30)), input_shape=(160, 320, 3)))
     # Resize the image
     m.add(Lambda(resize_func))
-    # Turn the image to gray scale
-    m.add(Lambda(grayscale_func))
     # Normalization layer
     m.add(Lambda(lambda im: im / 255.0 - 0.5))
     # Convolution layer 1 - out = 31x98x24
@@ -77,14 +65,14 @@ def model(dropout_rate):
     m.add(Convolution2D(48, (5, 5), strides=(2, 2), activation='relu'))
     # Convolution layer 5 - out = 3x20x64
     m.add(Convolution2D(64, (3, 3), activation='relu'))
+    # Dropout layer
+    m.add(Dropout(rate=dropout_rate))
     # Convolution layer 6 - out = 1x18x64
     m.add(Convolution2D(64, (3, 3), activation='relu'))
     # Flatten layer - out = 1x1152
     m.add(Flatten())
     # Fully connected 1
     m.add(Dense(100, activation='relu'))
-    # Dropout layer
-    m.add(Dropout(rate=dropout_rate))
     # Fully connected 2
     m.add(Dense(50, activation='relu'))
     # Fully connected 3
@@ -261,10 +249,10 @@ def main(_):
         m = model(FLAGS.dropout_rate)
 
     adam = Adam(lr=FLAGS.learning_rate)
-    m.compile(optimizer=adam, loss='mse', metrics=['accuracy'])
+    m.compile(optimizer=adam, loss='mse')
 
     tensorboard_callback = TensorBoard(batch_size=FLAGS.batch_size,
-                                       write_grads=True, write_images=True, histogram_freq=1)
+                                       write_grads=True, write_images=True)
 
     # Training the model
     for data in load_drive_data():
