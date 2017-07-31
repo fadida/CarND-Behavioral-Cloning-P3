@@ -17,7 +17,7 @@ The goals / steps of this project are the following:
 [image5]: ./writeup_resources/example2_3.jpg "Recovery Image"
 [image6]: ./writeup_resources/example3_1.jpg "Normal Image"
 [image7]: ./writeup_resources/example3_2.jpg "Flipped Image"
-[image8]: ./writeup_resources/example4_1.jpg "Flipped Image"
+[image8]: ./writeup_resources/example4_1.jpg "Normal Image"
 [image9]: ./writeup_resources/example4_2.jpg "Cropped Image"
 [image10]: ./writeup_resources/example5_1.jpg "Left Camera"
 [image11]: ./writeup_resources/example5_2.jpg "Center Camera"
@@ -188,8 +188,10 @@ In addition, the simulator provides us with images from three cameras: left, cen
 
 After the collection process, I had X number of data points. I then preprocessed this data by cropping, resizing and normalizing the pixels.
 Example for cropping:
+
 ![alt text][image8]
 ![alt text][image9]
+
 
 When loading the images I dropped 70% of the data with the car going straight, otherwise the model will have bias for going straight because most of the collected data is with little to no turning.
 
